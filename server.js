@@ -107,6 +107,7 @@ function makeRoom(name, isDefault){
     quizIds: [], solved: new Set(), locks: new Map(), // qid->pid
     timeLeft: CFG.time, impostorId: null, chances: CFG.chances,
     lastTick: 0,
+    hostId: null,               // 방장 = 가장 먼저 입장한 사람
     meeting: null               // {votes:Map(pid->target), until}
   };
   rooms.set(id, r);
@@ -117,6 +118,14 @@ function makeRoom(name, isDefault){
 
 function usedColors(room){ const s=new Set(); room.players.forEach(p=>s.add(p.color.id)); return s; }
 function pickColor(room){ const used=usedColors(room); return COLORS.find(c=>!used.has(c.id)) || COLORS[room.players.size % COLORS.length]; }
+// 방장 유지: 현재 방장이 없거나 나갔으면 가장 먼저 입장한 사람으로 지정
+function ensureHost(room){ if(room.hostId && room.players.has(room.hostId)) return;
+  room.hostId = room.players.keys().next().value || null; }
+// 시작 가능 조건: 최소 인원 이상 + 방장 제외 전원 준비완료
+function canStart(room){ const list=[...room.players.values()];
+  if(list.length < CFG.minPlayers) return false;
+  const others=list.filter(p=>p.id!==room.hostId);
+  return others.length>0 && others.every(p=>p.ready); }
 
 function roomList(){
   return [...rooms.values()].map(r=>({
@@ -128,7 +137,7 @@ function send(ws, msg){ try{ if(ws.readyState===1) ws.send(JSON.stringify(msg));
 function broadcast(room, msg){ room.players.forEach(p=>send(p.ws, msg)); }
 function lobbyWatchers(){ return [...wss.clients].filter(c=>c.readyState===1 && !c.roomId && c.kind!=='admin'); }
 function pushRoomList(){ const list=roomList(); lobbyWatchers().forEach(c=>send(c,{t:'rooms',rooms:list})); pushAdmin(); }
-function lobbyPayload(room){ return { t:'lobby', roomId:room.id, name:room.name,
+function lobbyPayload(room){ return { t:'lobby', roomId:room.id, name:room.name, hostId:room.hostId,
   players:[...room.players.values()].map(p=>({id:p.id,nick:p.nick,ready:p.ready,color:p.color})) }; }
 
 /* ---------- 입장/대기실 ---------- */
@@ -141,6 +150,7 @@ function joinRoom(ws, room, nick){
   const player = { id:pid, ws, nick:(nick||'익명').slice(0,12), ready:false, color,
     x:sp[0], y:sp[1], face:1, role:'crew', jailed:false, everJailed:false, jailUntil:0 };
   room.players.set(pid, player);
+  ensureHost(room);
   ws.roomId = room.id; ws.pid = pid; ws.kind='player';
   send(ws, { t:'joined', roomId:room.id, name:room.name, you:pid, color, cfg:{capacity:CFG.capacity,minPlayers:CFG.minPlayers} });
   broadcast(room, lobbyPayload(room));
@@ -151,11 +161,15 @@ function setReady(room, pid, ready){
   const p = room.players.get(pid); if(!p) return;
   p.ready = !!ready;
   broadcast(room, lobbyPayload(room));
-  // 자동 시작 판정
-  const list=[...room.players.values()];
-  const allReady = list.length>=CFG.minPlayers && list.every(x=>x.ready);
-  if(allReady && room.state==='lobby'){ beginCountdown(room); }
-  else if(!allReady && room.state==='countdown'){ cancelCountdown(room); }
+  // 준비가 풀려 조건이 깨지면 카운트다운 취소 (자동 시작은 하지 않음 — 방장이 직접 시작)
+  if(room.state==='countdown' && !canStart(room)) cancelCountdown(room);
+}
+// 방장이 '게임 시작'을 눌렀을 때
+function hostStart(room, pid){
+  if(!room || room.state!=='lobby') return;
+  if(pid!==room.hostId) return;          // 방장만 시작 가능
+  if(!canStart(room)) return;            // 최소 인원 + 전원 준비 확인
+  beginCountdown(room);
 }
 function beginCountdown(room){
   room.state='countdown'; let n=3;
@@ -322,7 +336,7 @@ function leaveRoom(ws){
   if(room.players.size===0){
     if(room.countdownT){ clearInterval(room.countdownT); room.countdownT=null; }
     if(!room.isDefault){ rooms.delete(room.id); pushRoomList(); return; }
-    room.state='lobby'; room.impostorId=null; room.meeting=null; pushRoomList(); return;
+    room.state='lobby'; room.impostorId=null; room.meeting=null; room.hostId=null; pushRoomList(); return;
   }
   if(room.state==='playing'){
     if(wasImp){ endGame(room, true, '🚪 임포스터가 방을 나갔어요. 견습생 승리!'); return; }
@@ -330,10 +344,8 @@ function leaveRoom(ws){
     const remaining=[...room.players.values()].filter(p=>p.role!=='impostor'&&!p.everJailed);
     if(remaining.length===0){ endGame(room, false, '🔮 모든 견습생이 봉인됐어요! 임포스터 승리!'); return; }
   }
-  if(room.state==='countdown'){ // 인원 변화로 준비 조건 깨질 수 있음
-    const list=[...room.players.values()];
-    if(!(list.length>=CFG.minPlayers && list.every(x=>x.ready))) cancelCountdown(room);
-  }
+  ensureHost(room); // 방장이 나갔으면 다음으로 먼저 입장한 사람이 방장
+  if(room.state==='countdown' && !canStart(room)) cancelCountdown(room);
   broadcast(room, lobbyPayload(room));
   pushRoomList();
 }
@@ -398,6 +410,7 @@ wss.on('connection', (ws)=>{
         if([...rooms.values()].length>=40){ send(ws,{t:'error',msg:'방이 너무 많아요.'}); break; }
         const nm=(m.name||'새 방').slice(0,16); const r=makeRoom(nm,false); joinRoom(ws,r,m.nick); break; }
       case 'ready': if(room) setReady(room, ws.pid, m.ready); break;
+      case 'hostStart': if(room) hostStart(room, ws.pid); break;
       case 'move': if(room && room.state==='playing'){ const p=room.players.get(ws.pid);
         if(p && !p.jailed && !room.meeting){ p.x=Math.max(0,Math.min(WORLD.w,m.x)); p.y=Math.max(0,Math.min(WORLD.h,m.y)); p.face=m.face||1; } } break;
       case 'reqQuiz': if(room) assignQuiz(room, ws.pid); break;
