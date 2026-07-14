@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>수상한 마법학교 — 관리자</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%94%A7%3C/text%3E%3C/svg%3E">
+<style>
+  @font-face{font-family:'Bagel';font-style:normal;font-weight:400;font-display:swap;
+    src:url('fonts/bagel-fat-one-korean-400-normal.woff2') format('woff2'),url('fonts/bagel-fat-one-korean-400-normal.woff') format('woff');}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:'Pretendard',-apple-system,'Malgun Gothic',sans-serif;background:#0b0716;color:#eef1ff;min-height:100vh}
+  .wrap{max-width:900px;margin:0 auto;padding:24px}
+  h1{font-family:'Bagel',sans-serif;font-size:30px;margin:0 0 4px;letter-spacing:.5px} .muted{color:#9c9ad6;font-size:14px}
+  .card{background:#161028;border:1px solid #2e2760;border-radius:16px;padding:20px;margin-top:16px}
+  input{background:#1d1840;border:1.5px solid #2e2760;border-radius:10px;color:#fff;padding:12px 14px;font-size:16px;outline:none;width:100%}
+  .btn{border:0;border-radius:11px;padding:12px 18px;font-weight:800;font-size:15px;color:#fff;cursor:pointer}
+  .btn.primary{background:linear-gradient(180deg,#a06bff,#7a3de8);width:100%;margin-top:10px}
+  .btn.danger{background:linear-gradient(180deg,#ff5568,#c22440)}
+  .btn:disabled{opacity:.5}
+  table{width:100%;border-collapse:collapse;margin-top:8px}
+  th,td{text-align:left;padding:8px 10px;border-bottom:1px solid #241f4a;font-size:14px}
+  th{color:#9c9ad6;font-weight:700}
+  .pill{display:inline-block;font-size:11px;font-weight:800;padding:2px 8px;border-radius:20px}
+  .pill.lobby{background:#1f5a38;color:#8affbe}.pill.playing{background:#5a2230;color:#ffb0bd}.pill.countdown{background:#5a5222;color:#ffe19a}.pill.ended{background:#333;color:#ccc}
+  .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+  .hidden{display:none}
+  .status{font-size:13px;color:#9c9ad6;margin-top:8px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>🔧 관리자 콘솔</h1>
+  <p class="muted">수상한 마법학교 — 모든 방 현황을 보고, 전체 게임을 강제 종료할 수 있어요.</p>
+
+  <div class="card" id="loginCard">
+    <label class="muted">관리자 비밀번호</label>
+    <input id="pw" type="password" placeholder="비밀번호" style="margin-top:6px" autocomplete="off">
+    <button class="btn primary" id="loginBtn">로그인</button>
+    <p class="status" id="loginStatus"></p>
+  </div>
+
+  <div class="card hidden" id="panel">
+    <div class="row" style="justify-content:space-between">
+      <div><b>실시간 현황</b> <span class="muted" id="summary"></span></div>
+      <button class="btn danger" id="endAllBtn">⛔ 모든 게임 강제 종료 · 전원 퇴장</button>
+    </div>
+    <table>
+      <thead><tr><th>방</th><th>상태</th><th>인원</th><th>플레이어</th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <p class="status" id="status"></p>
+  </div>
+</div>
+<script>
+const $=s=>document.querySelector(s);
+let ws, authed=false;
+function connect(){
+  const proto=location.protocol==='https:'?'wss':'ws';
+  ws=new WebSocket(proto+'://'+location.host);
+  ws.onopen=()=>{ $("#loginStatus").textContent="서버 연결됨. 비밀번호를 입력하세요."; };
+  ws.onclose=()=>{ $("#status").textContent="연결 끊김 — 새로고침"; };
+  ws.onmessage=e=>{ let m;try{m=JSON.parse(e.data);}catch(_){return;}
+    if(m.t==='adminOk'){ authed=true; $("#loginCard").classList.add("hidden"); $("#panel").classList.remove("hidden"); poll(); }
+    else if(m.t==='adminFail'){ $("#loginStatus").textContent="비밀번호가 틀렸어요."; }
+    else if(m.t==='adminSnapshot'){ render(m.rooms); }
+  };
+}
+connect();
+$("#loginBtn").onclick=()=>{ const pw=$("#pw").value; if(!pw)return; try{ws.send(JSON.stringify({t:'adminLogin',pw}));}catch(e){} };
+$("#pw").addEventListener("keydown",e=>{if(e.key==='Enter')$("#loginBtn").click();});
+$("#endAllBtn").onclick=()=>{ if(confirm("정말 모든 방의 게임을 강제 종료하고 전원 퇴장시킬까요?")){ ws.send(JSON.stringify({t:'adminEndAll'})); $("#status").textContent="강제 종료 요청을 보냈어요."; } };
+function poll(){ if(authed){ try{ws.send(JSON.stringify({t:'adminState'}));}catch(e){} setTimeout(poll,1500);} }
+function render(rooms){
+  let tot=0, playing=0;
+  $("#rows").innerHTML=rooms.map(r=>{ tot+=r.count; if(r.state==='playing')playing++;
+    const names=r.players.map(p=>p.nick+(p.role==='impostor'?' 😈':'')+(p.ready?' ✔':'')).join(', ')||'<span class="muted">비어있음</span>';
+    return `<tr><td><b>${r.name}</b>${r.isDefault?'':' <span class="muted">(생성)</span>'}</td>
+      <td><span class="pill ${r.state}">${({lobby:'대기중',countdown:'시작중',playing:'게임중',ended:'종료'})[r.state]}</span></td>
+      <td>${r.count}명</td><td>${names}</td></tr>`; }).join("");
+  $("#summary").textContent=`· 총 ${rooms.length}개 방 · 접속 ${tot}명 · 진행중 ${playing}개`;
+}
+</script>
+</body>
+</html>

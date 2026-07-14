@@ -1,0 +1,17 @@
+{
+  "name": "magic-impostor",
+  "version": "1.0.0",
+  "description": "수상한 마법학교 — 마법 학교 방탈출 실시간 멀티플레이 가정 복습 게임",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "ws": "^8.18.0"
+  }
+}

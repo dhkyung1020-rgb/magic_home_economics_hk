@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: magic-impostor
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node server.js
+    envVars:
+      - key: ADMIN_PASSWORD
+        sync: false   # Render 대시보드에서 직접 값을 입력하세요(관리자 비밀번호)
