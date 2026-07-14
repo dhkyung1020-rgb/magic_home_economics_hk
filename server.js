@@ -28,7 +28,8 @@ const CFG = {
   sealRange: numEnv('SEAL_RANGE', 140),// 봉인 사거리(월드 px)
   jailDur:   numEnv('JAIL_DUR', 8),    // 봉인 지속(초)
   meetingDur:numEnv('MEETING_DUR', 24),// 긴급회의 투표 시간(초)
-  chances:   numEnv('CHANCES', 2)      // 임포스터 지목 기회
+  chances:   numEnv('CHANCES', 2),     // 임포스터 지목 기회
+  botFill:   numEnv('BOT_FILL', 6)     // 사람이 5명 이하면 이 수까지 컴퓨터 플레이어로 채움
 };
 
 const COLORS = [
@@ -50,6 +51,22 @@ const WORLD = { w:1680, h:1040 };
 const SPAWNS = [[240,210],[1290,220],[240,820],[820,850],[1370,810],[870,530],[420,470],[1150,470]];
 const JAIL = { x:1300, y:430, w:320, h:200 };
 function jailSlot(i){ return { x: JAIL.x+40+(i%4)*70, y: JAIL.y+50+Math.floor(i/4)*70 }; }
+// 봇 이동용 맵 지오메트리(클라이언트와 동일)
+const ROOMS_S=[{x:60,y:60,w:360,h:300},{x:1080,y:60,w:420,h:320},{x:60,y:660,w:360,h:320},{x:640,y:700,w:360,h:300},{x:1180,y:640,w:380,h:340},{x:700,y:420,w:340,h:220}];
+const CORR_S=[{x:60,y:470,w:1560,h:130},{x:180,y:300,w:140,h:260},{x:1230,y:320,w:140,h:240},{x:180,y:510,w:140,h:210},{x:1310,y:510,w:140,h:210},{x:770,y:510,w:150,h:250}];
+const WALK_S=[...ROOMS_S,...CORR_S,JAIL]; const MG_S=10;
+function inWalkS(x,y){ for(const r of WALK_S){ if(x>=r.x+MG_S&&x<=r.x+r.w-MG_S&&y>=r.y+MG_S&&y<=r.y+r.h-MG_S) return true; } return false; }
+const BOT_NAMES=['초코','토토','뿅뿅','랄라','포포','키키','두두','몽몽'];
+function humanCount(room){ let n=0; room.players.forEach(p=>{ if(!p.isBot) n++; }); return n; }
+function addBots(room, n){
+  for(let i=0;i<n;i++){
+    const id='bot_'+uid('p'); const color=pickColor(room);
+    const sp=SPAWNS[room.players.size % SPAWNS.length];
+    room.players.set(id, { id, ws:null, isBot:true, nick:'🤖 '+BOT_NAMES[i%BOT_NAMES.length], ready:true, color,
+      x:sp[0], y:sp[1], face:1, role:'crew', jailed:false, everJailed:false, jailUntil:0,
+      heading:Math.random()*6.283, headT:0 });
+  }
+}
 
 /* ---------- 퀴즈 (정답은 서버만 보관) ---------- */
 const BANK = [
@@ -129,7 +146,7 @@ function canStart(room){ const list=[...room.players.values()];
 
 function roomList(){
   return [...rooms.values()].map(r=>({
-    id:r.id, name:r.name, count:r.players.size, cap:CFG.capacity,
+    id:r.id, name:r.name, count:humanCount(r), cap:CFG.capacity,
     state:r.state, isDefault:r.isDefault
   }));
 }
@@ -188,22 +205,26 @@ function cancelCountdown(room){
 
 /* ---------- 게임 시작 ---------- */
 function startGame(room){
-  const list=[...room.players.values()];
-  if(list.length<CFG.minPlayers){ room.state='lobby'; return; }
-  // 역할 배정
-  const imp = list[Math.floor(Math.random()*list.length)];
+  const humans=[...room.players.values()].filter(p=>!p.isBot);
+  if(humans.length<CFG.minPlayers){ room.state='lobby'; return; }
+  // 임포스터는 반드시 '사람' 중에서 선정
+  const imp = humans[Math.floor(Math.random()*humans.length)];
   room.impostorId = imp.id;
-  list.forEach((p,i)=>{ p.role = (p.id===imp.id)?'impostor':'crew';
-    const sp=SPAWNS[i%SPAWNS.length]; p.x=sp[0]; p.y=sp[1]; p.face=1;
-    p.jailed=false; p.everJailed=false; p.jailUntil=0; p.sealReadyAt=0; });
+  // 사람이 5명 이하면 컴퓨터 플레이어로 채움
+  if(humans.length < CFG.botFill) addBots(room, CFG.botFill - humans.length);
+  const list=[...room.players.values()];
+  list.forEach((p,i)=>{ p.role = (p.id===room.impostorId)?'impostor':'crew';
+    const sp=SPAWNS[i%SPAWNS.length]; p.x=sp[0]+(Math.random()*30-15); p.y=sp[1]+(Math.random()*30-15); p.face=1;
+    p.jailed=false; p.everJailed=false; p.jailUntil=0; p.sealReadyAt=0;
+    if(p.isBot){ p.heading=Math.random()*6.283; p.headT=0; } });
   room.quizIds = shuffle(BANK.map((_,i)=>i)).slice(0, Math.min(CFG.quizN, BANK.length));
   room.solved = new Set(); room.locks = new Map();
   room.timeLeft = CFG.time; room.chances = CFG.chances; room.meeting=null;
   room.state='playing'; room.lastTick=Date.now();
-  const pubPlayers = list.map(p=>({id:p.id,nick:p.nick,color:p.color,x:p.x,y:p.y}));
-  list.forEach(p=>send(p.ws,{ t:'start', youId:p.id, role:p.role,
-    quizN:room.quizIds.length, time:CFG.time, players:pubPlayers,
-    sealCd:CFG.sealCd, sealRange:CFG.sealRange, cfg:CFG }));
+  const pub = list.map(p=>({id:p.id,nick:p.nick,color:p.color,x:p.x,y:p.y}));
+  room.players.forEach(p=>{ if(p.isBot) return; send(p.ws,{ t:'start', youId:p.id, role:p.role,
+    quizN:room.quizIds.length, time:CFG.time, players:pub,
+    sealCd:CFG.sealCd, sealRange:CFG.sealRange, cfg:CFG }); });
   pushRoomList();
 }
 
@@ -243,6 +264,16 @@ function sealPlayer(room, target){
 /* ---------- 퀴즈 ---------- */
 function assignQuiz(room, pid){
   const p=room.players.get(pid); if(!p||p.jailed||room.meeting) return;
+  if(room.quizIds.length===0){ send(p.ws,{t:'noQuiz'}); return; }
+  if(p.role==='impostor'){
+    // 위장용: 실제 집계와 무관하게 문제를 순환 제공(같은 문제 반복 안 됨)
+    if(p.fakeIdx===undefined) p.fakeIdx=0;
+    const qid=room.quizIds[p.fakeIdx % room.quizIds.length]; p.fakeIdx++;
+    const e=BANK[qid];
+    send(p.ws,{t:'quizQ', qid, part:e.part, q:e.q, o:shuffle(e.o), adv:!!e.adv,
+      solved:room.solved.size, quizN:room.quizIds.length, fake:true});
+    return;
+  }
   const qid = room.quizIds.find(q=>!room.solved.has(q) && !room.locks.has(q));
   if(qid===undefined){ send(p.ws,{t:'noQuiz'}); return; }
   room.locks.set(qid, pid);
@@ -253,11 +284,14 @@ function assignQuiz(room, pid){
 function answerQuiz(room, pid, qid, choice){
   const p=room.players.get(pid); if(!p) return;
   const e=BANK[qid]; if(!e) return;
-  if(room.locks.get(qid)!==pid){ /* 이미 남이 처리 */ }
   const correct=isCorrect(e, choice);
+  if(p.role==='impostor'){
+    // 임포스터는 위장만 — 집계/락에 영향 없음
+    send(p.ws,{t:'answerResult', correct, answer:e.a, ex:e.ex, solved:room.solved.size, quizN:room.quizIds.length, fake:true});
+    return;
+  }
   if(correct){
-    room.locks.delete(qid);
-    if(p.role!=='impostor') room.solved.add(qid); // 임포스터 정답은 집계 안 함(위장)
+    room.locks.delete(qid); room.solved.add(qid);
     broadcast(room,{t:'progress', solved:room.solved.size, quizN:room.quizIds.length});
     send(p.ws,{t:'answerResult', correct:true, answer:e.a, ex:e.ex, solved:room.solved.size, quizN:room.quizIds.length});
     if(room.solved.size>=room.quizIds.length) endGame(room, true, '📖 제한시간 안에 모든 퀴즈를 완료했어요! 견습생 승리!');
@@ -279,8 +313,8 @@ function callMeeting(room, pid){
 function castVote(room, pid, target){
   if(!room.meeting) return;
   room.meeting.votes.set(pid, target); // target: pid or 'skip'
-  broadcast(room,{t:'voteCount', count:room.meeting.votes.size, total:room.players.size});
-  if(room.meeting.votes.size>=room.players.size) tallyMeeting(room);
+  broadcast(room,{t:'voteCount', count:room.meeting.votes.size, total:humanCount(room)});
+  if(room.meeting.votes.size>=humanCount(room)) tallyMeeting(room);
 }
 function tallyMeeting(room){
   if(!room.meeting) return;
@@ -318,8 +352,11 @@ function endGame(room, crewWin, reason){
 }
 function resetRoom(room){
   if(!rooms.has(room.id)) return;
+  // 컴퓨터 플레이어(봇) 제거
+  [...room.players.keys()].forEach(id=>{ if(room.players.get(id).isBot) room.players.delete(id); });
   room.state='lobby'; room.impostorId=null; room.meeting=null; room.solved=new Set(); room.locks=new Map();
-  room.players.forEach(p=>{ p.ready=false; p.role='crew'; p.jailed=false; p.everJailed=false; });
+  room.players.forEach(p=>{ p.ready=false; p.role='crew'; p.jailed=false; p.everJailed=false; p.fakeIdx=undefined; });
+  ensureHost(room);
   broadcast(room, lobbyPayload(room));
   broadcast(room, {t:'reset'});
   pushRoomList();
@@ -333,8 +370,10 @@ function leaveRoom(ws){
   const wasImp = room.impostorId===pid;
   room.players.delete(pid);
   for(const [qid,who] of [...room.locks]) if(who===pid) room.locks.delete(qid);
-  if(room.players.size===0){
+  // 사람이 아무도 안 남으면 방 비우기(봇도 제거)
+  if(humanCount(room)===0){
     if(room.countdownT){ clearInterval(room.countdownT); room.countdownT=null; }
+    [...room.players.keys()].forEach(id=>room.players.delete(id));
     if(!room.isDefault){ rooms.delete(room.id); pushRoomList(); return; }
     room.state='lobby'; room.impostorId=null; room.meeting=null; room.hostId=null; pushRoomList(); return;
   }
@@ -353,8 +392,8 @@ function leaveRoom(ws){
 /* ---------- 관리자 ---------- */
 function adminSnapshot(){
   return { t:'adminSnapshot', rooms:[...rooms.values()].map(r=>({
-    id:r.id, name:r.name, isDefault:r.isDefault, state:r.state, count:r.players.size,
-    players:[...r.players.values()].map(p=>({nick:p.nick, ready:p.ready, role:r.state==='playing'?p.role:undefined}))
+    id:r.id, name:r.name, isDefault:r.isDefault, state:r.state, count:humanCount(r),
+    players:[...r.players.values()].map(p=>({nick:p.nick, ready:p.ready, role:r.state==='playing'?p.role:undefined, bot:!!p.isBot}))
   })) };
 }
 function pushAdmin(){ [...wss.clients].filter(c=>c.readyState===1 && c.kind==='admin').forEach(c=>send(c, adminSnapshot())); }
@@ -386,6 +425,13 @@ setInterval(()=>{
       // 봉인 해제
       room.players.forEach(p=>{ if(p.jailed && now>=p.jailUntil){ p.jailed=false;
         p.x=JAIL.x-40; p.y=JAIL.y+JAIL.h/2; send(p.ws,{t:'youReleased'}); } });
+      // 컴퓨터 플레이어(봇) 이동 — 벽 충돌 배회
+      room.players.forEach(p=>{ if(!p.isBot||p.jailed)return;
+        p.headT-=dt; if(p.headT<=0){ p.heading=Math.random()*6.283; p.headT=1.2+Math.random()*2.2; }
+        const spd=1.9*dt*60, nx=p.x+Math.cos(p.heading)*spd, ny=p.y+Math.sin(p.heading)*spd; let moved=false;
+        if(inWalkS(nx,p.y)){ p.x=nx; moved=true; p.face=Math.cos(p.heading)<0?-1:1; }
+        if(inWalkS(p.x,ny)){ p.y=ny; moved=true; }
+        if(!moved) p.headT=0; });
       if(room.timeLeft<=0){ endGame(room, false, '⏰ 시간이 다 되었어요! 임포스터의 승리!'); return; }
     }
     // 상태 브로드캐스트
